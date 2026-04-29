@@ -1,0 +1,10 @@
+venv/
+_pycache_/
+*.pyc
+*.pyo
+*.pyd
+.git/
+.idea/
+.vscode/
+uploads/
+.env
