@@ -28,6 +28,7 @@ allowed_origins = [
     "http://127.0.0.1:5173",
     frontend_origin,
     "https://ai-resume-matcher-ruddy.vercel.app",
+    "https://ai-resume-matcher-qccv.onrender.com"
 ]
 app.add_middleware(
     CORSMiddleware,
