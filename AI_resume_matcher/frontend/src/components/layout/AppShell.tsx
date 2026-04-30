@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import {
   Bot,
+  Briefcase,
   FileText,
   History,
   LogOut,
@@ -30,6 +31,21 @@ const navItems = [
     label: "匹配分析",
     path: "/match",
     icon: FileText,
+  },
+  {
+    label: "简历管理",
+    path: "/resumes",
+    icon: FileText,
+  },
+  {
+    label: "岗位管理",
+    path: "/jobs",
+    icon: Briefcase,
+  },
+  {
+    label: "Agent问答",
+    path: "/agent",
+    icon: Bot,
   },
   {
     label: "历史结果",

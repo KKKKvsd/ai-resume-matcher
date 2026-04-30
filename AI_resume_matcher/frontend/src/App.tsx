@@ -7,6 +7,9 @@ import ResultDetailPage from "./pages/ResultDetailPage";
 import AppShell from "./components/layout/AppShell";
 import ProtectedRoute from "./components/common/ProtectedRoute";
 import { isLoggedIn } from "./lib/auth";
+import ResumesPage from "./pages/ResumesPage";
+import JobsPage from "./pages/JobsPage";
+import AgentPage from "./pages/AgentPage";
 
 export default function App() {
   return (
@@ -43,6 +46,39 @@ export default function App() {
           <ProtectedRoute>
             <AppShell>
               <ResultsPage />
+            </AppShell>
+          </ProtectedRoute>
+        }
+      />
+
+      <Route
+        path="/agent"
+        element={
+          <ProtectedRoute>
+            <AppShell>
+              <AgentPage />
+            </AppShell>
+          </ProtectedRoute>
+        }
+      />
+
+      <Route
+        path="/resumes"
+        element={
+          <ProtectedRoute>
+            <AppShell>
+              <ResumesPage />
+            </AppShell>
+          </ProtectedRoute>
+        }
+      />
+
+      <Route
+        path="/jobs"
+        element={
+          <ProtectedRoute>
+            <AppShell>
+              <JobsPage />
             </AppShell>
           </ProtectedRoute>
         }

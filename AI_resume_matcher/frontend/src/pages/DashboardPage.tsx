@@ -25,13 +25,19 @@ const cards = [
     title: "简历管理",
     desc: "上传 PDF 简历并解析文本内容。",
     icon: FileText,
-    path: "/match",
+    path: "/resumes",
   },
   {
     title: "岗位 JD 管理",
     desc: "创建岗位描述，作为匹配分析对象。",
     icon: Briefcase,
-    path: "/match",
+    path: "/jobs",
+  },
+  {
+    title: "Agent问答",
+    desc: "基于最近一次匹配结果继续追问、改写和生成面试题。",
+    icon: Bot,
+    path: "/agent",
   },
 ];
 
