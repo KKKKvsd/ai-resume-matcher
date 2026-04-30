@@ -43,8 +43,17 @@ def on_startup():
     Base.metadata.create_all(bind=engine)
 
     with engine.connect() as conn:
-        result = conn.execute(text("SELECT DATABASE()"))
-        logger.info(f"Current database: {result.scalar()}")
+        if engine.dialect.name == "postgresql":
+            result = conn.execute(text("SELECT current_database()"))
+        elif engine.dialect.name == "mysql":
+            result = conn.execute(text("SELECT DATABASE()"))
+        else:
+            result = None
+        
+        if result is not None:
+            logger.info(f"Current database: {result.scalar()}")
+        else:
+            logger.info(f"Current database dialect: {engine.dialect.name}")
 
 @app.exception_handler(StarletteHTTPException)
 async def http_exception_handler(request: Request, exc: StarletteHTTPException):
