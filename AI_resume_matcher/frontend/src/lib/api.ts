@@ -208,15 +208,10 @@ export async function streamAgent(
   const decoder = new TextDecoder("utf-8");
   let buffer = "";
 
-  const startTime = performance.now();
-  let chunkCount = 0;
 
   while (true) {
     const { value, done } = await reader.read();
     if (done) break;
-
-    chunkCount++;
-    const elapsed = performance.now() - startTime;
 
     buffer += decoder.decode(value, { stream: true });
 

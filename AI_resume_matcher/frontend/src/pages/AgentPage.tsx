@@ -11,7 +11,7 @@ import {
   User2,
   Wand2,
 } from "lucide-react";
-import { askFollowUp, createAgentSession, runAgent, streamAgent } from "../lib/api";
+import { askFollowUp, createAgentSession, streamAgent } from "../lib/api";
 import type { AgentResponse } from "../types/api";
 import PageHeader from "../components/common/PageHeader";
 
