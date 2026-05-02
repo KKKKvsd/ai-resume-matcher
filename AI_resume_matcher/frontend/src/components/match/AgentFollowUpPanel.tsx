@@ -244,9 +244,9 @@ export default function AgentFollowUpPanel({ resultId }: Props) {
                   />
                 </div>
 
-                {agentResult.warning.length > 0 && (
+                {agentResult.warnings.length > 0 && (
                   <div className="mt-4 rounded-2xl bg-amber-50 p-3 text-xs leading-5 text-amber-700">
-                    {agentResult.warning.map((warning, index) => (
+                    {agentResult.warnings.map((warning, index) => (
                       <div key={index}>• {warning}</div>
                     ))}
                   </div>

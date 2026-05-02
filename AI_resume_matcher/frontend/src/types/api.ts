@@ -62,6 +62,14 @@ export type FollowUpResponse = {
     based_on_result_id: number;
 };
 
+export type AgentMemoryInfo = {
+    used_session_memory: boolean;
+    used_longterm_memory: boolean;
+    summary_compressed: boolean;
+    session_id: string | null;
+    tokens_estimate: number;
+};
+
 export type AgentResponse = {
     intent: string;
     final_answer: string | null;
@@ -70,5 +78,10 @@ export type AgentResponse = {
     result: Record<string, unknown>;
     confidence: number | null;
     mode: string | null;
-    warning: string[];
+    warnings: string[];
+    memory: AgentMemoryInfo | null;
+};
+
+export type CreateSessionResponse = {
+    session_id: string;
 };

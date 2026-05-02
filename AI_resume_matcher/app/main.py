@@ -16,6 +16,7 @@ from app.api.user import router as user_router
 from app.api.job import router as job_router
 from app.api.resume import router as resume_router
 from app.api.match import router as match_router
+from app.api.metrics import router as metrics_router
 from app.utils.response import error_response
 from app.core.logger import logger
 
@@ -90,6 +91,7 @@ app.include_router(user_router)
 app.include_router(job_router)
 app.include_router(resume_router)
 app.include_router(match_router)
+app.include_router(metrics_router)
 
 @app.get("/ping")
 def ping():

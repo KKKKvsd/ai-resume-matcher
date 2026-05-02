@@ -38,3 +38,9 @@ dist-ssr
 *.sw?
 frontend/.env
 frontend/.env.example
+*.db
+*.sqlite
+.mypy_cache_
+Thumbs.db
+
+tests/eval/reports/

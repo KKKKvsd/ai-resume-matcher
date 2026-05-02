@@ -80,6 +80,10 @@ class MatchFollowUPResponse(BaseModel):
 
 class AgentTaskRequest(BaseModel):
     query: str = Field(..., min_length=1, max_length=1000)
+    session_id: str | None = Field(
+        default=None,
+        description="可选会话ID，同一会话的多轮追问应使用同一个session_id；不传则按无记忆模式处理。",
+    )
 
 
 class AgentTaskDataResponse(BaseModel):
@@ -91,9 +95,18 @@ class AgentTaskDataResponse(BaseModel):
     confidence: float | None = None
     mode: str | None = None
     warnings: list[str] = Field(default_factory=list)
+    memory: dict[str, Any] | None = None
 
 
 class AgentTaskResponse(BaseModel):
     code: int
     message: str
     data: AgentTaskDataResponse
+
+class CreateSessionResponseData(BaseModel):
+    session_id: str
+
+class CreateSessionResponse(BaseModel):
+    code: int
+    message: str
+    data: CreateSessionResponseData

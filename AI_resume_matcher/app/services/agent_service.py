@@ -1,10 +1,12 @@
 import json
-from typing import Any, Callable, Literal
+from typing import Any, Callable, Literal, Iterator
+from sqlalchemy.orm import Session
 
 from pydantic import ValidationError
 
 from app.core.logger import logger
 from app.schemas.agent import AgentPlan, AgentToolCall, AgentTraceStep
+from app.schemas.memory import MemoryBundle
 from app.services.tools_service import (
     analyze_match_tool,
     deepsearch_tool,
@@ -16,7 +18,14 @@ from app.services.tools_service import (
     retrieve_knowledge_tool,
     rewrite_suggestions_tool,
 )
-from app.utils.llm_client import call_llm, clean_llm_json_text
+from app.services.memory_service import (
+    append_turn,
+    build_memory_bundle,
+    extract_facts_from_session,
+    get_or_create_session,
+    render_memory_for_prompt,
+)
+from app.utils.llm_client import call_llm, clean_llm_json_text, call_llm_stream, LLMCallError
 
 
 Intent = Literal[
@@ -151,17 +160,27 @@ def _build_rule_based_plan(query: str) -> AgentPlan:
     )
 
 
-def _build_planner_prompt(query: str, resume_text: str, job_text: str, latest_suggestions: list[str]) -> str:
+def _build_planner_prompt(
+    query: str,
+    resume_text: str,
+    job_text: str,
+    latest_suggestions: list[str],
+    memory_context: str = "",  # ← 新增参数
+) -> str:
     tool_descriptions = "\n".join(
         f"- {name}: {description}" for name, description in TOOL_SPECS.items()
     )
+
+    memory_block = ""
+    if memory_context:
+        memory_block = f"\n【记忆上下文（可用于决策）】\n{memory_context}\n"
 
     return f"""
 你是一个生产级求职 Agent 的 Planner。你需要根据用户请求，选择工具并生成一个可执行计划。
 
 可用工具：
 {tool_descriptions}
-
+{memory_block}
 限制：
 1. 只能使用上面列出的 tool_name。
 2. 最多生成 {MAX_AGENT_STEPS} 个步骤。
@@ -169,6 +188,7 @@ def _build_planner_prompt(query: str, resume_text: str, job_text: str, latest_su
 4. 复杂调研类问题使用 deepsearch。
 5. 最后必须使用 generate_final_answer。
 6. 只返回合法 JSON，不要 Markdown，不要解释。
+7. 如果记忆上下文中已包含必要信息（例如已经分析过该简历），可以省略冗余步骤。
 
 返回 JSON 格式：
 {{
@@ -199,15 +219,19 @@ def _build_planner_prompt(query: str, resume_text: str, job_text: str, latest_su
 """.strip()
 
 
-def _request_llm_plan(query: str, resume_text: str, job_text: str, latest_suggestions: list[str]) -> tuple[AgentPlan, str]:
-    """
-    使用 LLM 生成计划；失败时回退规则计划。
-    """
+def _request_llm_plan(
+    query: str,
+    resume_text: str,
+    job_text: str,
+    latest_suggestions: list[str],
+    memory_context: str = "",  # ← 新增
+) -> tuple[AgentPlan, str]:
     prompt = _build_planner_prompt(
         query=query,
         resume_text=resume_text,
         job_text=job_text,
         latest_suggestions=latest_suggestions,
+        memory_context=memory_context,  # ← 透传
     )
 
     try:
@@ -339,20 +363,30 @@ def _build_final_answer_fallback(query: str, state: dict[str, Any]) -> str:
     return "\n\n".join(part for part in parts if part)
 
 
-def _synthesize_final_answer(query: str, plan: AgentPlan, state: dict[str, Any], trace: list[dict[str, Any]]) -> str:
-    """
-    用 LLM 汇总工具结果；失败时使用 deterministic fallback。
-    """
+def _synthesize_final_answer(
+    query: str,
+    plan: AgentPlan,
+    state: dict[str, Any],
+    trace: list[dict[str, Any]],
+    memory_context: str = "",  # ← 新增
+) -> str:
     compact_state = {
         "job_keywords": state.get("job_keywords", []),
         "keyword_gap": state.get("keyword_gap", {}),
-        "knowledge_chunks_count": len(state.get("knowledge", {}).get("chunks", [])) if isinstance(state.get("knowledge"), dict) else 0,
+        "knowledge_chunks_count": (
+            len(state.get("knowledge", {}).get("chunks", []))
+            if isinstance(state.get("knowledge"), dict) else 0
+        ),
         "deepsearch": state.get("deepsearch", {}),
         "match_analysis": state.get("match_analysis", {}),
         "resume_rewrite": state.get("resume_rewrite", ""),
         "interview_questions": state.get("interview_questions", {}),
         "learning_plan": state.get("learning_plan", {}),
     }
+
+    memory_block = ""
+    if memory_context:
+        memory_block = f"\n【记忆上下文】\n{memory_context}\n"
 
     prompt = f"""
 你是一个 AI 求职 Agent 的最终回答生成器。
@@ -363,12 +397,10 @@ def _synthesize_final_answer(query: str, plan: AgentPlan, state: dict[str, Any],
 1. 回答要具体、可执行。
 2. 不要编造工具结果中没有的经历、公司或指标。
 3. 如果是简历改写，给出可以直接放进简历的 bullet。
-4. 如果是面试准备，按“重点知识点 + 高频问题 + 准备建议”输出。
-5. 如果是匹配分析，按“匹配结论 + 已匹配能力 + 缺口 + 下一步优化”输出。
-
-用户问题：
-{query}
-
+4. 如果是面试准备，按"重点知识点 + 高频问题 + 准备建议"输出。
+5. 如果是匹配分析，按"匹配结论 + 已匹配能力 + 缺口 + 下一步优化"输出。
+6. 如果记忆上下文中提示了用户偏好（如喜欢的格式），请遵守。
+{memory_block}
 Agent 计划：
 {plan.model_dump_json()}
 
@@ -377,6 +409,9 @@ Agent 计划：
 
 执行轨迹：
 {json.dumps(trace, ensure_ascii=False, default=str)}
+
+用户问题：
+{query}
 """.strip()
 
     try:
@@ -384,7 +419,6 @@ Agent 计划：
     except Exception as error:
         logger.warning(f"Final answer synthesis failed, fallback used: {repr(error)}")
         return _build_final_answer_fallback(query=query, state=state)
-
 
 def _execute_tool(
     step: AgentToolCall,
@@ -514,14 +548,15 @@ def run_agent_pipeline(
     resume_text: str,
     job_text: str,
     latest_suggestions: list[str] | None = None,
+    db: Session | None = None,        # ← 新增
+    session_id: str | None = None,    # ← 新增
+    user_id: int | None = None,       # ← 新增
 ) -> dict[str, Any]:
     """
-    Production-style Agent Pipeline:
-    1. LLM Planner 生成工具计划
-    2. Plan Sanitizer 校验工具名、步骤数、必需步骤
-    3. Tool Executor 执行工具并写入 working memory
-    4. Final Synthesizer 汇总工具结果
-    5. Trace / confidence / warnings 返回给前端，便于调试和展示
+    Production-style Agent Pipeline (with optional memory).
+
+    Memory 启用条件:同时传入 db, session_id, user_id 三个参数。
+    任一未传则等价于旧的无记忆行为。
     """
     latest_suggestions = latest_suggestions or []
     warnings: list[str] = []
@@ -538,11 +573,36 @@ def run_agent_pipeline(
         "learning_plan": {},
     }
 
+    # === 1. 拉取记忆 ===
+    memory_bundle: MemoryBundle | None = None
+    memory_context = ""
+
+    use_memory = db is not None and session_id and user_id is not None
+    if use_memory:
+        try:
+            get_or_create_session(db=db, session_id=session_id, user_id=user_id)
+            memory_bundle = build_memory_bundle(
+                db=db, session_id=session_id, user_id=user_id, query=query
+            )
+            memory_context = render_memory_for_prompt(memory_bundle)
+            if memory_bundle.used_session_memory or memory_bundle.used_longterm_memory:
+                logger.info(
+                    f"Memory injected: session={memory_bundle.used_session_memory}, "
+                    f"longterm={memory_bundle.used_longterm_memory}, "
+                    f"tokens≈{memory_bundle.total_tokens_estimate}"
+                )
+        except Exception as exc:
+            logger.warning(f"Memory bundle build failed; continuing without memory: {repr(exc)}")
+            warnings.append("Memory unavailable; continuing in stateless mode.")
+            use_memory = False
+
+    # === 2. Plan → Execute ===
     plan, mode = _request_llm_plan(
         query=query,
         resume_text=resume_text,
         job_text=job_text,
         latest_suggestions=latest_suggestions,
+        memory_context=memory_context,
     )
 
     if mode == "rule_fallback":
@@ -559,7 +619,6 @@ def run_agent_pipeline(
                 job_text=job_text,
                 latest_suggestions=latest_suggestions,
             )
-
             trace_step = AgentTraceStep(
                 step_id=index,
                 tool_name=step.tool_name,
@@ -569,11 +628,9 @@ def run_agent_pipeline(
                 status="success",
                 error=None,
             )
-
         except Exception as error:
             logger.error(f"Agent tool failed: tool={step.tool_name}, error={repr(error)}")
             warnings.append(f"工具 {step.tool_name} 执行失败：{repr(error)}")
-
             trace_step = AgentTraceStep(
                 step_id=index,
                 tool_name=step.tool_name,
@@ -583,7 +640,6 @@ def run_agent_pipeline(
                 status="failed",
                 error=repr(error),
             )
-
         trace.append(trace_step.model_dump())
 
     final_answer = _synthesize_final_answer(
@@ -591,8 +647,22 @@ def run_agent_pipeline(
         plan=plan,
         state=state,
         trace=trace,
+        memory_context=memory_context,
     )
 
+    # === 3. 写回记忆 ===
+    if use_memory:
+        try:
+            append_turn(db=db, session_id=session_id, role="user", content=query, intent=plan.intent)
+            append_turn(db=db, session_id=session_id, role="agent", content=final_answer, intent=plan.intent)
+            extracted = extract_facts_from_session(db=db, session_id=session_id, user_id=user_id)
+            if extracted > 0:
+                logger.info(f"Persisted {extracted} new long-term facts.")
+        except Exception as exc:
+            logger.warning(f"Memory persistence failed: {repr(exc)}")
+            warnings.append("Memory persistence failed; conversation not saved.")
+
+    # === 4. 返回 ===
     result = {
         "job_keywords": state.get("job_keywords", []),
         "keyword_gap": state.get("keyword_gap", {}),
@@ -613,4 +683,314 @@ def run_agent_pipeline(
         "confidence": _calculate_confidence(mode=mode, trace=trace, state=state),
         "mode": mode,
         "warnings": warnings,
+        "memory": (
+            {
+                "used_session_memory": memory_bundle.used_session_memory,
+                "used_longterm_memory": memory_bundle.used_longterm_memory,
+                "summary_compressed": memory_bundle.summary_compressed,
+                "session_id": session_id,
+                "tokens_estimate": memory_bundle.total_tokens_estimate,
+            }
+            if memory_bundle
+            else None
+        ),
     }
+
+
+def _make_event(event_type: str, data) -> dict:
+    """统一事件结构。"""
+    return {"type": event_type, "data": data}
+
+
+def run_agent_pipeline_stream(
+    query: str,
+    resume_text: str,
+    job_text: str,
+    latest_suggestions: list[str] | None = None,
+    db: Session | None = None,
+    session_id: str | None = None,
+    user_id: int | None = None,
+) -> Iterator[dict]:
+    """
+    流式 Agent pipeline。生成器形式 yield 事件。
+
+    事件类型: status / plan / tool_start / tool_done / token / memory / warning / error / done
+    """
+    latest_suggestions = latest_suggestions or []
+    state: dict[str, Any] = {
+        "query": query,
+        "latest_suggestions": latest_suggestions,
+        "job_keywords": [],
+        "keyword_gap": {},
+        "knowledge": {},
+        "deepsearch": {},
+        "match_analysis": {},
+        "resume_rewrite": "",
+        "interview_questions": {},
+        "learning_plan": {},
+    }
+    warnings: list[str] = []
+
+    yield _make_event("status", {"message": "正在启动 Agent..."})
+
+    # === 1. 拉取记忆 ===
+    memory_bundle = None
+    memory_context = ""
+    use_memory = db is not None and session_id and user_id is not None
+    if use_memory:
+        try:
+            get_or_create_session(db=db, session_id=session_id, user_id=user_id)
+            memory_bundle = build_memory_bundle(
+                db=db, session_id=session_id, user_id=user_id, query=query
+            )
+            memory_context = render_memory_for_prompt(memory_bundle)
+            yield _make_event(
+                "memory",
+                {
+                    "used_session_memory": memory_bundle.used_session_memory,
+                    "used_longterm_memory": memory_bundle.used_longterm_memory,
+                    "summary_compressed": memory_bundle.summary_compressed,
+                    "session_id": session_id,
+                    "tokens_estimate": memory_bundle.total_tokens_estimate,
+                },
+            )
+        except Exception as exc:
+            logger.warning(f"Stream memory bundle failed: {repr(exc)}")
+            warnings.append("Memory unavailable; continuing in stateless mode.")
+            use_memory = False
+            memory_context = ""
+
+    # === 2. 生成 Plan ===
+    yield _make_event("status", {"message": "正在制定执行计划..."})
+
+    plan, mode = _request_llm_plan(
+        query=query,
+        resume_text=resume_text,
+        job_text=job_text,
+        latest_suggestions=latest_suggestions,
+        memory_context=memory_context,
+    )
+
+    if mode == "rule_fallback":
+        warnings.append("LLM Planner 不可用,已使用规则兜底计划。")
+        yield _make_event("warning", {"message": "Planner 降级到规则模式"})
+
+    yield _make_event(
+        "plan",
+        {
+            "intent": plan.intent,
+            "goal": plan.goal,
+            "steps_count": len(plan.steps),
+            "steps_preview": [
+                {"tool_name": s.tool_name, "reason": s.reason}
+                for s in plan.steps[:MAX_AGENT_STEPS]
+            ],
+            "mode": mode,
+        },
+    )
+
+    # === 3. 工具执行 ===
+    trace: list[dict[str, Any]] = []
+    for index, step in enumerate(plan.steps[:MAX_AGENT_STEPS], start=1):
+        if step.tool_name == "generate_final_answer":
+            continue  # 我们自己流式生成 final answer
+
+        yield _make_event(
+            "tool_start",
+            {"step_id": index, "tool_name": step.tool_name, "reason": step.reason},
+        )
+
+        try:
+            output = _execute_tool(
+                step=step,
+                state=state,
+                resume_text=resume_text,
+                job_text=job_text,
+                latest_suggestions=latest_suggestions,
+            )
+            short_output = _safe_short_output(output)
+            trace_step = AgentTraceStep(
+                step_id=index,
+                tool_name=step.tool_name,
+                reason=step.reason,
+                input=step.input,
+                output=short_output,
+                status="success",
+                error=None,
+            )
+            yield _make_event(
+                "tool_done",
+                {
+                    "step_id": index,
+                    "tool_name": step.tool_name,
+                    "status": "success",
+                    "output_preview": _summarize_tool_output(step.tool_name, output, state),
+                },
+            )
+        except Exception as error:
+            logger.error(f"Streaming agent tool failed: {step.tool_name}, {repr(error)}")
+            warnings.append(f"工具 {step.tool_name} 执行失败: {repr(error)}")
+            trace_step = AgentTraceStep(
+                step_id=index,
+                tool_name=step.tool_name,
+                reason=step.reason,
+                input=step.input,
+                output=None,
+                status="failed",
+                error=repr(error),
+            )
+            yield _make_event(
+                "tool_done",
+                {
+                    "step_id": index,
+                    "tool_name": step.tool_name,
+                    "status": "failed",
+                    "error": repr(error),
+                },
+            )
+
+        trace.append(trace_step.model_dump())
+
+    # === 4. 流式生成最终回答 ===
+    yield _make_event("status", {"message": "正在生成最终回答..."})
+
+    final_answer_parts: list[str] = []
+    try:
+        final_prompt = _build_streaming_synthesis_prompt(
+            query=query,
+            plan=plan,
+            state=state,
+            trace=trace,
+            memory_context=memory_context,
+        )
+
+        for token in call_llm_stream(final_prompt, temperature=0.2, profile="heavy"):
+            final_answer_parts.append(token)
+            yield _make_event("token", {"text": token})
+
+        final_answer = "".join(final_answer_parts).strip()
+
+    except LLMCallError as exc:
+        logger.error(f"Streaming final synthesis failed: {repr(exc)}")
+        warnings.append("最终回答 LLM 失败,已切换到 fallback")
+        try:
+            final_answer = _build_final_answer_fallback(query=query, state=state)
+        except Exception:
+            final_answer = "Agent 生成回答失败,请重试。"
+        yield _make_event("token", {"text": final_answer})
+
+    # === 5. 写回记忆 ===
+    if use_memory:
+        try:
+            append_turn(db=db, session_id=session_id, role="user", content=query, intent=plan.intent)
+            append_turn(db=db, session_id=session_id, role="agent", content=final_answer, intent=plan.intent)
+            extracted = extract_facts_from_session(db=db, session_id=session_id, user_id=user_id)
+            if extracted > 0:
+                logger.info(f"Stream extracted {extracted} new long-term facts")
+        except Exception as exc:
+            logger.warning(f"Stream memory persist failed: {repr(exc)}")
+
+    # === 6. done 事件 ===
+    confidence = _calculate_confidence(mode=mode, trace=trace, state=state)
+
+    yield _make_event(
+        "done",
+        {
+            "intent": plan.intent,
+            "final_answer": final_answer,
+            "plan": plan.model_dump(),
+            "steps": trace,
+            "result": {
+                "job_keywords": state.get("job_keywords", []),
+                "keyword_gap": state.get("keyword_gap", {}),
+                "match_analysis": _safe_short_output(state.get("match_analysis", {})),
+                "resume_rewrite": state.get("resume_rewrite", ""),
+                "interview_questions": state.get("interview_questions", {}),
+                "learning_plan": state.get("learning_plan", {}),
+            },
+            "confidence": confidence,
+            "mode": mode,
+            "warnings": warnings,
+            "memory": (
+                {
+                    "used_session_memory": memory_bundle.used_session_memory,
+                    "used_longterm_memory": memory_bundle.used_longterm_memory,
+                    "tokens_estimate": memory_bundle.total_tokens_estimate,
+                }
+                if memory_bundle else None
+            ),
+        },
+    )
+
+
+def _summarize_tool_output(tool_name: str, output, state: dict) -> dict:
+    """把工具输出压缩成可读摘要,避免给前端推大块数据。"""
+    if tool_name == "extract_job_keywords":
+        return {"keywords_count": len(state.get("job_keywords", []))}
+    if tool_name == "analyze_keyword_gap":
+        gap = state.get("keyword_gap", {})
+        return {
+            "matched_count": len(gap.get("matched_keywords", [])),
+            "missing_count": len(gap.get("missing_keywords", [])),
+        }
+    if tool_name == "retrieve_knowledge":
+        return {"chunks_count": len(state.get("knowledge", {}).get("chunks", []))}
+    if tool_name == "deepsearch":
+        return {"evidence_count": state.get("deepsearch", {}).get("evidence_count", 0)}
+    if tool_name == "analyze_match":
+        ma = state.get("match_analysis", {})
+        return {"score": ma.get("score"), "status": ma.get("status")}
+    return {"ok": True}
+
+
+def _build_streaming_synthesis_prompt(
+    query: str,
+    plan,
+    state: dict,
+    trace: list,
+    memory_context: str = "",
+) -> str:
+    """最终回答的流式 prompt(单独一份是因为流式返回不能复用 _synthesize_final_answer)。"""
+    compact_state = {
+        "job_keywords": state.get("job_keywords", []),
+        "keyword_gap": state.get("keyword_gap", {}),
+        "knowledge_chunks_count": (
+            len(state.get("knowledge", {}).get("chunks", []))
+            if isinstance(state.get("knowledge"), dict) else 0
+        ),
+        "deepsearch": state.get("deepsearch", {}),
+        "match_analysis": state.get("match_analysis", {}),
+        "resume_rewrite": state.get("resume_rewrite", ""),
+        "interview_questions": state.get("interview_questions", {}),
+        "learning_plan": state.get("learning_plan", {}),
+    }
+
+    memory_block = ""
+    if memory_context:
+        memory_block = f"\n【记忆上下文】\n{memory_context}\n"
+
+    return f"""
+你是一个 AI 求职 Agent 的最终回答生成器。
+
+请基于工具执行结果回答用户问题。
+
+要求:
+1. 回答要具体、可执行。
+2. 不要编造工具结果中没有的经历、公司或指标。
+3. 如果是简历改写,给出可以直接放进简历的 bullet。
+4. 如果是面试准备,按"重点知识点 + 高频问题 + 准备建议"输出。
+5. 如果是匹配分析,按"匹配结论 + 已匹配能力 + 缺口 + 下一步优化"输出。
+6. 如果记忆上下文中提示了用户偏好(如喜欢的格式),请遵守。
+{memory_block}
+Agent 计划:
+{plan.model_dump_json()}
+
+工具结果:
+{json.dumps(compact_state, ensure_ascii=False, default=str)}
+
+执行轨迹:
+{json.dumps(trace, ensure_ascii=False, default=str)}
+
+用户问题:
+{query}
+""".strip()
