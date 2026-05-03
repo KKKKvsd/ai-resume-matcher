@@ -65,8 +65,8 @@ export type FollowUpResponse = {
 export type AgentMemoryInfo = {
     used_session_memory: boolean;
     used_longterm_memory: boolean;
-    summary_compressed: boolean;
-    session_id: string | null;
+    summary_compressed?: boolean;
+    session_id?: string | null;
     tokens_estimate: number;
 };
 

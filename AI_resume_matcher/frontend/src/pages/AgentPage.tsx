@@ -419,7 +419,7 @@ function AgentMessageBubble({ message }: { message: Extract<Message, { role: "ag
                 <div className="mb-3 grid grid-cols-2 gap-2 text-slate-600 sm:grid-cols-4">
                   <MemoryStat label="会话记忆" value={memory.used_session_memory ? "已注入" : "未用"} active={memory.used_session_memory} />
                   <MemoryStat label="长期记忆" value={memory.used_longterm_memory ? "已注入" : "未用"} active={memory.used_longterm_memory} />
-                  <MemoryStat label="摘要压缩" value={memory.summary_compressed ? "已触发" : "未触发"} active={memory.summary_compressed} />
+                  <MemoryStat label="摘要压缩" value={memory.summary_compressed ? "已触发" : "未触发"} active={memory.summary_compressed ?? false} />
                   <MemoryStat label="记忆 token" value={`≈ ${memory.tokens_estimate}`} active={false} />
                 </div>
               )}

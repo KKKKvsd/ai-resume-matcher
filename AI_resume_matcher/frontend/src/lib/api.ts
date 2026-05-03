@@ -184,7 +184,7 @@ export async function streamAgent(
   signal?: AbortSignal,
 ): Promise<void> {
   const token = localStorage.getItem("access_token");
-  const baseUrl = import.meta.env.VITE_API_BASE_URL || "";
+  const baseUrl = API_BASE_URL;
 
   const response = await fetch(`${baseUrl}/api/v1/match/agent/stream`, {
     method: "POST",
