@@ -127,7 +127,7 @@ export default function AgentPage() {
         await streamAgent(trimmed, sessionId, (event) => {
           switch (event.type) {
             case "status": {
-              const message = event.data.message;
+              const message = event.data.message ?? "处理中...";
               updatePlaceholder((m) => {
                 if (m.content && !m.content.startsWith("▸")) return m;
                 return { ...m, content: `▸ ${message}` };
@@ -136,7 +136,7 @@ export default function AgentPage() {
             }
 
             case "tool_start": {
-              const toolName = event.data.tool_name;
+              const toolName = event.data.tool_name ?? "工具";
               updatePlaceholder((m) => {
                 if (m.content && !m.content.startsWith("▸")) return m;
                 return { ...m, content: `▸ 执行 ${toolName}...` };
@@ -154,7 +154,7 @@ export default function AgentPage() {
             }
 
             case "memory": {
-              const memData = event.data;
+              const memData = event.data ?? null;
               updatePlaceholder((m) => ({
                 ...m,
                 data: { ...m.data, memory: memData },
@@ -180,7 +180,7 @@ export default function AgentPage() {
               break;
 
             case "done": {
-              const doneData = event.data;
+              const doneData = event.data ?? {};
               updatePlaceholder((m) => ({
                 ...m,
                 data: {
